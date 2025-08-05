@@ -1,9 +1,9 @@
-# Hummingbird Hardhat Project
+# Hummingbird Contracts
 
 This repository contains a simple Hardhat project implementing the
 **Hummingbird** smart contract.  The Hummingbird contract records live
 telemetry for autonomous drones.  Each drone is represented by a unique
-identity (an Ethereum address) managed by the [`ioID`](https://github.com/iotexproject/ioID-contracts) project.  Drones submit
+identity (an Ethereum address) managed by the [`ioID`](https://github.com/flyhb/ioID-contracts) project.  Drones submit
 liveness updates directly to the contract, which verifies the device’s
 registration and project assignment via the ioID registry before
 recording the timestamped GPS coordinates on‑chain.
