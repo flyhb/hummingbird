@@ -51,7 +51,8 @@ npx hardhat test
 ## Deployment
 
 ### Berachain Testnet
-**HB Token**: 0x49cc6E12d483f4672B19fe703966D6E96A2A887F 
+**HB Token**: 0x49cc6E12d483f4672B19fe703966D6E96A2A887F
+
 **Hummingbird Logic**: 0x3F17Ae0e3798c170f9898677a87357089dadA288
 
 ### Instructions
