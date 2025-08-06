@@ -120,6 +120,6 @@ describe("Hummingbird", function () {
   it("reverts if the device belongs to a different project", async function () {
     await expect(
       hummingbird.connect(otherDevice).reportLiveness(0, 0)
-    ).to.be.revertedWith("invalid project");
+    ).to.be.revertedWith("not a hummingbird device");
   });
 });
