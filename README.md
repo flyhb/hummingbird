@@ -50,15 +50,19 @@ npx hardhat test
 
 ## Deployment
 
+### Berachain Testnet
+**HB Token**: 0x49cc6E12d483f4672B19fe703966D6E96A2A887F 
+**Hummingbird Logic**: 0x3F17Ae0e3798c170f9898677a87357089dadA288
+
+### Instructions
 Before deploying, replace the placeholder values in `scripts/deploy.js` with the actual deployed addresses of the ioID ERC‑721 contract, the ioID registry, the HB token contract and the project ID you want the Hummingbird contract to serve.
 The `rewardPerPing` variable controls how many HB tokens are credited per liveness message (expressed in 18‑decimals).  After deploying Hummingbird, a call to `setMinter` is required on the HB token contract to authorize the Hummingbird contract to mint rewards:
 
 ```bash
-// On the default Hardhat network
-npx hardhat run scripts/deploy.js
-
-// On a specific network defined in your Hardhat config
-npx hardhat run --network <network-name> scripts/deploy.js
+# Deploy the HB token
+npx hardhat run  --network <network-name> scripts/deploy_token
+# Deploy the Hummingbird contract (and set it as a minter in the token contract)
+npx hardhat run  --network <network-name> scripts/deploy.js
 ```
 
 ## Contributing

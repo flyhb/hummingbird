@@ -10,6 +10,7 @@ coverage/
 
 # Typechain generated typings
 typechain/
+typechain-types/
 
 # Environment files
 .env
