@@ -1,3 +1,6 @@
+import "./tasks/check-balance";
+import "./tasks/claim-balance";
+
 import '@nomicfoundation/hardhat-toolbox';
 import { HardhatUserConfig } from 'hardhat/config';
 
