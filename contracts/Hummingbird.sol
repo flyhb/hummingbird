@@ -67,22 +67,35 @@ contract Hummingbird {
 
     /// Struct capturing the last known liveness data for a device. 
     /// More status info to be added later.
+    ///
+    /// If latitude, longitude or ready status are unchanged from a previous
+    /// submission, they can be omitted from the next call by passing
+    /// the appropriate sentinel values (see `reportLiveness`).  The
+    /// `hasLat`, `hasLong` and `hasReady` flags track whether an
+    /// initial value has been provided, allowing the contract to
+    /// revert if an update attempts to omit a value that has never
+    /// been set.
     struct LivenessData {
-        uint256 timestamp; // UNIX time when the liveness was recorded
-        int256 latitude;   // latitude multiplied by 1e7 to retain precision
-        int256 longitude;  // longitude multiplied by 1e7 to retain precision
+        uint256 timestamp; // Timestamp supplied by the device
+        int256 latitude;   // Latitude ×1e7
+        int256 longitude;  // Longitude ×1e7
+        bool ready;        // Ready status
+        bool hasLat;
+        bool hasLong;
+        bool hasReady;
     }
 
     /// Mapping from device address to its most recently submitted liveness.
     mapping(address => LivenessData) private _lastLiveness;
 
     /// Emitted whenever a device successfully submits liveness information.
-    /// TODO: Consider if we should remove this log as it's too dense.
+    /// Includes all resolved fields: timestamp, latitude, longitude and ready.
     event LivenessReported(
         address indexed device,
         uint256 timestamp,
         int256 latitude,
-        int256 longitude
+        int256 longitude,
+        bool ready
     );
 
     /// Emitted when rewards are added to a drone owner's pending balance.
@@ -121,14 +134,35 @@ contract Hummingbird {
     /// Submit a liveness proof for the calling device.
     ///
     /// Drones call this function directly, signing the transaction with
-    /// their own private keys.  The contract only verifies that the caller is
+    /// their own private keys.  The contract verifies that the caller is
     /// registered via the ioID registry and that the device belongs to the
-    /// Hummingbird project.  GPS coordinates should be provided as signed
-    /// integers scaled by 1e7
+    /// Hummingbird project.
     ///
-    /// @param latitude Latitude in degrees ×1e7.
-    /// @param longitude Longitude in degrees ×1e7.
-    function reportLiveness(int256 latitude, int256 longitude) external {
+    /// Fields may be omitted by passing sentinel values.  If omitted,
+    /// the previously recorded value will be reused.  Omitting a
+    /// value when none has been recorded will cause the call to
+    /// revert.
+    ///
+    /// Latitude and longitude must be provided as signed integers
+    /// scaled by 1e7.  To omit an unchanged value, pass
+    /// `type(int256).min`.
+    ///
+    /// Ready status is encoded as an integer: 1 for ready, 0 for
+    /// not ready and -1 to indicate no change.  Any other value will
+    /// cause the call to revert.
+    ///
+    /// A timestamp must always be provided by the device.
+    ///
+    /// @param latitude Latitude ×1e7, or `type(int256).min` to reuse the previous value.
+    /// @param longitude Longitude ×1e7, or `type(int256).min` to reuse the previous value.
+    /// @param readyVal Ready status encoded as 1=true, 0=false, -1=unchanged.
+    /// @param timestamp Timestamp supplied by the device.
+    function reportLiveness(
+        int256 latitude,
+        int256 longitude,
+        int256 readyVal,
+        uint256 timestamp
+    ) external {
         address device = msg.sender;
         // Is it a registered device?
         require(registry.exists(device), "device not registered");
@@ -137,15 +171,47 @@ contract Hummingbird {
             ioID.deviceProject(device) == projectId,
             "not a hummingbird device"
         );
-        // Record liveness data
-        LivenessData memory data = LivenessData({
-            timestamp: block.timestamp,
-            latitude: latitude,
-            longitude: longitude
-        });
-        _lastLiveness[device] = data;
-        emit LivenessReported(device, data.timestamp, latitude, longitude);
-
+        // Timestamp must be non-zero to prevent confusion
+        require(timestamp != 0, "timestamp required");
+        // Load existing data
+        LivenessData storage current = _lastLiveness[device];
+        // Resolve latitude
+        int256 lat;
+        if (latitude != type(int256).min) {
+            lat = latitude;
+            current.latitude = latitude;
+            current.hasLat = true;
+        } else {
+            // Unchanged latitude requires previous value
+            require(current.hasLat, "No previous latitude");
+            lat = current.latitude;
+        }
+        // Resolve longitude
+        int256 lon;
+        if (longitude != type(int256).min) {
+            lon = longitude;
+            current.longitude = longitude;
+            current.hasLong = true;
+        } else {
+            require(current.hasLong, "No previous longitude");
+            lon = current.longitude;
+        }
+        // Resolve ready status
+        bool ready;
+        if (readyVal == -1) {
+            require(current.hasReady, "No previous ready status");
+            ready = current.ready;
+        } else if (readyVal == 0 || readyVal == 1) {
+            ready = (readyVal == 1);
+            current.ready = ready;
+            current.hasReady = true;
+        } else {
+            revert("ready must be 0, 1, or -1");
+        }
+        // Update timestamp
+        current.timestamp = timestamp;
+        // Emit full liveness
+        emit LivenessReported(device, timestamp, lat, lon, ready);
         // Look up the owner of this device in the ioID ecosystem. 
         uint256 tokenId = registry.deviceTokenId(device);
         address ownerOfDevice = ioID.ownerOf(tokenId);
@@ -157,19 +223,30 @@ contract Hummingbird {
     /// Retrieve the last recorded liveness data for a given device.
     ///
     /// Anyone can query the last liveness of a device.  If no liveness has
-    /// been recorded yet, the returned timestamp will be zero.
+    /// been recorded yet, all returned values will be their zero value.
     ///
     /// @param device Address of the drone device.
     /// @return timestamp UNIX time of last liveness, zero if none.
-    /// @return latitude Latitude x1e7.
-    /// @return longitude Longitude x1e7.
+    /// @return latitude Latitude ×1e7.
+    /// @return longitude Longitude ×1e7.
+    /// @return ready Ready status of the last liveness record.
     function lastLiveness(
         address device
-    ) external view returns (uint256 timestamp, int256 latitude, int256 longitude) {
+    )
+        external
+        view
+        returns (
+            uint256 timestamp,
+            int256 latitude,
+            int256 longitude,
+            bool ready
+        )
+    {
         LivenessData memory data = _lastLiveness[device];
         timestamp = data.timestamp;
         latitude = data.latitude;
         longitude = data.longitude;
+        ready = data.ready;
     }
 
     /// Return the pending HB reward balance for a device owner.

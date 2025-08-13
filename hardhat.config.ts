@@ -5,7 +5,7 @@ import * as dotenv from 'dotenv';
 
 dotenv.config();
 
-const PRIVATE_KEY = process.env.BERA_PRIVATE_KEY;
+const PRIVATE_KEY = process.env.DEPLOYER_KEY;
 const accounts = PRIVATE_KEY !== undefined ? [PRIVATE_KEY] : [];
 
 const config: HardhatUserConfig = {

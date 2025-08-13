@@ -88,16 +88,20 @@ describe("Hummingbird", function () {
   it("records liveness for a registered device belonging to the project", async function () {
     const latitude = 377749000; // 37.7749° × 1e7
     const longitude = -1224194000; // -122.4194° × 1e7
+    const readyVal = 1; // ready = true
+    const timestamp = 1; // arbitrary non-zero timestamp
     await expect(
-      hummingbird.connect(device).reportLiveness(latitude, longitude)
+      hummingbird.connect(device).reportLiveness(latitude, longitude, readyVal, timestamp)
     )
       .to.emit(hummingbird, "LivenessReported")
-      .withArgs(device.address, anyValue, latitude, longitude);
+      .withArgs(device.address, timestamp, latitude, longitude, true);
 
     const data = await hummingbird.lastLiveness(device.address);
-    expect(data.timestamp).to.be.gt(0);
-    expect(data.latitude).to.equal(latitude);
-    expect(data.longitude).to.equal(longitude);
+    // data is a tuple: [timestamp, latitude, longitude, ready]
+    expect(data[0]).to.be.equal(timestamp);
+    expect(data[1]).to.equal(latitude);
+    expect(data[2]).to.equal(longitude);
+    expect(data[3]).to.equal(true);
 
     // Rewards should accrue to the device owner (deployer) after one ping
     const rewardPerPing = ethers.parseUnits("1", 18);
@@ -113,13 +117,13 @@ describe("Hummingbird", function () {
 
   it("reverts if the device is not registered", async function () {
     await expect(
-      hummingbird.connect(unknownDevice).reportLiveness(0, 0)
+      hummingbird.connect(unknownDevice).reportLiveness(0, 0, 0, 1)
     ).to.be.revertedWith("device not registered");
   });
 
   it("reverts if the device belongs to a different project", async function () {
     await expect(
-      hummingbird.connect(otherDevice).reportLiveness(0, 0)
+      hummingbird.connect(otherDevice).reportLiveness(0, 0, 0, 1)
     ).to.be.revertedWith("not a hummingbird device");
   });
 });
