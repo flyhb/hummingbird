@@ -2,116 +2,111 @@
 pragma solidity ^0.8.19;
 
 /*
- * @title Hummingbird
- * @notice This contract records on‑chain liveness proofs for autonomous drones.
- * Each drone has a unique identity (a wallet address) managed by the ioID
- * ecosystem. The drone signs and submits transactions directly to this
- * contract, providing its current status including GPS location. 
- * The contract verifies registration of the device via the ioID registry and 
- * associates the liveness information with the appropriate project.  
- * Currently, only registered devices belonging to the Hummingbird project 
- * may call the liveness submission function.
+ * Hummingbird: liveness + delivery
  */
 
-/// @dev Minimal subset of the ioID ERC721 interface.  The Hummingbird
-/// contract uses this to check that a given device address is bound to
-/// the correct project.
 interface IioID {
-    /// Returns the project ID associated with a device address.  A value of
-    /// zero indicates that the device is not registered to any project.
     function deviceProject(address device) external view returns (uint256);
-
-    /// Returns the owner (i.e. controller) of the given token ID.  This
-    /// mirrors the ERC721 `ownerOf` function in the ioID NFT.
     function ownerOf(uint256 tokenId) external view returns (address);
 }
 
-/// @dev Minimal subset of the ioID registry interface.  Used to verify
-/// whether a device address has been registered.
 interface IioIDRegistry {
-    /// Returns true if a record exists for the given device address.
     function exists(address device) external view returns (bool);
-
-    /// Returns the token ID associated with a device address.  Used by
-    /// Hummingbird to locate the NFT and determine its owner.
     function deviceTokenId(address device) external view returns (uint256);
 }
 
-/// @dev Minimal interface for the reward token.  
 interface IHBToken {
     function mint(address to, uint256 amount) external;
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
 contract Hummingbird {
-
-    /// Address of the ioID ERC721 implementation. 
+    // ─── Core (unchanged) ─────────────────────────────────────────────────────
     IioID public immutable ioID;
-
-    /// Address of the ioID registry.
     IioIDRegistry public immutable registry;
-
-    /// The project id of the Hummingbird project in the context of ioID
     uint256 public immutable projectId;
-
-    /// Reward token used to compensate drone owners.
     IHBToken public immutable hbToken;
 
-    /// Amount of HB tokens awarded per liveness message.
     uint256 public rewardPerPing;
-
-    /// Accumulated, unclaimed rewards for each owner. 
     mapping(address => uint256) private _pendingRewards;
-
-    /// Owner of the contract.
     address public owner;
 
-    /// Struct capturing the last known liveness data for a device. 
-    /// More status info to be added later.
-    ///
-    /// If latitude, longitude or ready status are unchanged from a previous
-    /// submission, they can be omitted from the next call by passing
-    /// the appropriate sentinel values (see `reportLiveness`).  The
-    /// `hasLat`, `hasLong` and `hasReady` flags track whether an
-    /// initial value has been provided, allowing the contract to
-    /// revert if an update attempts to omit a value that has never
-    /// been set.
+    // ─── Delivery ─────────────────────────────────────────────────────────────
+    uint256 private _nextRequestId;
+
+    enum Status { Open, Proposed, Accepted, Started, PickedUp, Dropped, Completed, Cancelled }
+
+    struct DeliveryRequest {
+        uint256 id;
+        address requester;
+        int32 pickupLatE7;
+        int32 pickupLonE7;
+        int32 dropLatE7;
+        int32 dropLonE7;
+        uint256 price;           // final agreed price
+        uint256 proposedPrice;   // proposed by drone
+        address drone;
+        Status  status;
+        uint64  requestedAt;
+        uint64  proposedAt;
+        address targetedDevice;
+        uint64  expiresAt;
+        uint256 maxPrice;
+        // NEW: timestamp of acceptance (used for 2-minute cancel window)
+        uint64  acceptedAt;
+    }
+
+    mapping(uint256 => DeliveryRequest) public requests;
+
+    uint256[] private _openIds;
+    mapping(uint256 => uint256) private _openIndex;
+
+    mapping(address => uint256[]) private _deviceOpenIds;
+    mapping(address => mapping(uint256 => uint256)) private _deviceOpenIndex;
+
+    mapping(address => uint256[]) private _myRequestIds;
+
+    uint256 public constant FEE_BPS = 300;     // 3%
+    uint256 public constant BPS_DENOM = 10_000;
+    uint256 public constant CANCEL_WINDOW = 120; // 120 seconds after acceptance
+
+    event DeliveryRequested(
+        uint256 indexed id,
+        address indexed requester,
+        int32 pickupLatE7,
+        int32 pickupLonE7,
+        int32 dropLatE7,
+        int32 dropLonE7,
+        uint64 requestedAt,
+        address targetedDevice,
+        uint64 expiresAt,
+        uint256 maxPrice
+    );
+    event DeliveryProposed(uint256 indexed id, address indexed drone, uint256 price, uint64 proposedAt);
+    event DeliveryAccepted(uint256 indexed id, address indexed drone, uint256 price);
+    event DeliveryStarted(uint256 indexed id, address indexed drone);
+    event PackagePicked(uint256 indexed id, address indexed drone);
+    event PackageDropped(uint256 indexed id, address indexed drone);
+    event DeliveryCompleted(uint256 indexed id, address indexed drone, uint256 payout);
+    event DeliveryCancelled(uint256 indexed id);
+
+    // ─── Liveness (unchanged) ─────────────────────────────────────────────────
     struct LivenessData {
-        uint256 timestamp; // Timestamp supplied by the device
-        int256 latitude;   // Latitude ×1e7
-        int256 longitude;  // Longitude ×1e7
-        bool ready;        // Ready status
+        uint256 timestamp;
+        int256 latitude;
+        int256 longitude;
+        bool ready;
         bool hasLat;
         bool hasLong;
         bool hasReady;
     }
-
-    /// Mapping from device address to its most recently submitted liveness.
     mapping(address => LivenessData) private _lastLiveness;
 
-    /// Emitted whenever a device successfully submits liveness information.
-    /// Includes all resolved fields: timestamp, latitude, longitude and ready.
-    event LivenessReported(
-        address indexed device,
-        uint256 timestamp,
-        int256 latitude,
-        int256 longitude,
-        bool ready
-    );
-
-    /// Emitted when rewards are added to a drone owner's pending balance.
-    /// TODO: Consider if we should remove this log as it's too dense.
+    event LivenessReported(address indexed device, uint256 timestamp, int256 latitude, int256 longitude, bool ready);
     event RewardAccumulated(address indexed owner, uint256 amount);
-
-    /// Emitted when a user successfully claims their accumulated rewards.
     event RewardClaimed(address indexed owner, uint256 amount);
 
-    /// Constructs the Hummingbird contract.
-    ///
-    /// @param _ioID Address of the deployed ioID ERC721 contract.
-    /// @param _registry Address of the ioID registry contract.
-    /// @param _hbToken Address of the HB token contract used for rewards.
-    /// @param _projectId Identifier of the Hummingbird project id.
-    /// @param _rewardPerPing The number of HB tokens accumulated per liveness report.
     constructor(
         IioID _ioID,
         IioIDRegistry _registry,
@@ -131,62 +126,24 @@ contract Hummingbird {
         owner = msg.sender;
     }
 
-    /// Submit a liveness proof for the calling device.
-    ///
-    /// Drones call this function directly, signing the transaction with
-    /// their own private keys.  The contract verifies that the caller is
-    /// registered via the ioID registry and that the device belongs to the
-    /// Hummingbird project.
-    ///
-    /// Fields may be omitted by passing sentinel values.  If omitted,
-    /// the previously recorded value will be reused.  Omitting a
-    /// value when none has been recorded will cause the call to
-    /// revert.
-    ///
-    /// Latitude and longitude must be provided as signed integers
-    /// scaled by 1e7.  To omit an unchanged value, pass
-    /// `type(int256).min`.
-    ///
-    /// Ready status is encoded as an integer: 1 for ready, 0 for
-    /// not ready and -1 to indicate no change.  Any other value will
-    /// cause the call to revert.
-    ///
-    /// A timestamp must always be provided by the device.
-    ///
-    /// @param latitude Latitude ×1e7, or `type(int256).min` to reuse the previous value.
-    /// @param longitude Longitude ×1e7, or `type(int256).min` to reuse the previous value.
-    /// @param readyVal Ready status encoded as 1=true, 0=false, -1=unchanged.
-    /// @param timestamp Timestamp supplied by the device.
-    function reportLiveness(
-        int256 latitude,
-        int256 longitude,
-        int256 readyVal,
-        uint256 timestamp
-    ) external {
+    function reportLiveness(int256 latitude, int256 longitude, int256 readyVal, uint256 timestamp) external {
         address device = msg.sender;
-        // Is it a registered device?
         require(registry.exists(device), "device not registered");
-        // Is it a Hummingbird drone?
-        require(
-            ioID.deviceProject(device) == projectId,
-            "not a hummingbird device"
-        );
-        // Timestamp must be non-zero to prevent confusion
+        require(ioID.deviceProject(device) == projectId, "not a hummingbird device");
         require(timestamp != 0, "timestamp required");
-        // Load existing data
+
         LivenessData storage current = _lastLiveness[device];
-        // Resolve latitude
+
         int256 lat;
         if (latitude != type(int256).min) {
             lat = latitude;
             current.latitude = latitude;
             current.hasLat = true;
         } else {
-            // Unchanged latitude requires previous value
             require(current.hasLat, "No previous latitude");
             lat = current.latitude;
         }
-        // Resolve longitude
+
         int256 lon;
         if (longitude != type(int256).min) {
             lon = longitude;
@@ -196,7 +153,7 @@ contract Hummingbird {
             require(current.hasLong, "No previous longitude");
             lon = current.longitude;
         }
-        // Resolve ready status
+
         bool ready;
         if (readyVal == -1) {
             require(current.hasReady, "No previous ready status");
@@ -208,54 +165,25 @@ contract Hummingbird {
         } else {
             revert("ready must be 0, 1, or -1");
         }
-        // Update timestamp
+
         current.timestamp = timestamp;
-        // Emit full liveness
         emit LivenessReported(device, timestamp, lat, lon, ready);
-        // Look up the owner of this device in the ioID ecosystem. 
+
         uint256 tokenId = registry.deviceTokenId(device);
         address ownerOfDevice = ioID.ownerOf(tokenId);
-        // Accumulate rewards for the owner. 
         _pendingRewards[ownerOfDevice] += rewardPerPing;
         emit RewardAccumulated(ownerOfDevice, rewardPerPing);
     }
 
-    /// Retrieve the last recorded liveness data for a given device.
-    ///
-    /// Anyone can query the last liveness of a device.  If no liveness has
-    /// been recorded yet, all returned values will be their zero value.
-    ///
-    /// @param device Address of the drone device.
-    /// @return timestamp UNIX time of last liveness, zero if none.
-    /// @return latitude Latitude ×1e7.
-    /// @return longitude Longitude ×1e7.
-    /// @return ready Ready status of the last liveness record.
-    function lastLiveness(
-        address device
-    )
-        external
-        view
-        returns (
-            uint256 timestamp,
-            int256 latitude,
-            int256 longitude,
-            bool ready
-        )
-    {
-        LivenessData memory data = _lastLiveness[device];
-        timestamp = data.timestamp;
-        latitude = data.latitude;
-        longitude = data.longitude;
-        ready = data.ready;
+    function lastLiveness(address device) external view returns (uint256, int256, int256, bool) {
+        LivenessData memory d = _lastLiveness[device];
+        return (d.timestamp, d.latitude, d.longitude, d.ready);
     }
 
-    /// Return the pending HB reward balance for a device owner.
     function pendingReward(address account) external view returns (uint256) {
         return _pendingRewards[account];
     }
 
-    /// Claim accumulated HB rewards for the caller.  This mints new HB
-    /// tokens.
     function claimRewards() external {
         uint256 amount = _pendingRewards[msg.sender];
         require(amount > 0, "no rewards");
@@ -264,9 +192,225 @@ contract Hummingbird {
         emit RewardClaimed(msg.sender, amount);
     }
 
-    /// Update the reward per liveness report. 
     function setRewardPerPing(uint256 newReward) external {
         require(msg.sender == owner, "only owner");
         rewardPerPing = newReward;
+    }
+
+    // ─── Internal helpers ─────────────────────────────────────────────────────
+    function _requireAuthorized() internal view returns (address device) {
+        device = msg.sender;
+        require(registry.exists(device), "device not registered");
+        require(ioID.deviceProject(device) == projectId, "not a hummingbird device");
+    }
+
+    function _ownerOfDevice(address device) internal view returns (address) {
+        uint256 tokenId = registry.deviceTokenId(device);
+        return ioID.ownerOf(tokenId);
+    }
+
+    function _openAdd(uint256 id) internal {
+        _openIds.push(id);
+        _openIndex[id] = _openIds.length;
+    }
+
+    function _openRemove(uint256 id) internal {
+        uint256 i1 = _openIndex[id];
+        if (i1 == 0) return;
+        uint256 i = i1 - 1;
+        uint256 last = _openIds[_openIds.length - 1];
+        if (i != _openIds.length - 1) {
+            _openIds[i] = last;
+            _openIndex[last] = i1;
+        }
+        _openIds.pop();
+        delete _openIndex[id];
+    }
+
+    function _deviceOpenAdd(address device, uint256 id) internal {
+        _deviceOpenIds[device].push(id);
+        _deviceOpenIndex[device][id] = _deviceOpenIds[device].length;
+    }
+
+    function _deviceOpenRemove(address device, uint256 id) internal {
+        uint256 i1 = _deviceOpenIndex[device][id];
+        if (i1 == 0) return;
+        uint256 i = i1 - 1;
+        uint256 last = _deviceOpenIds[device][_deviceOpenIds[device].length - 1];
+        if (i != _deviceOpenIds[device].length - 1) {
+            _deviceOpenIds[device][i] = last;
+            _deviceOpenIndex[device][last] = i1;
+        }
+        _deviceOpenIds[device].pop();
+        delete _deviceOpenIndex[device][id];
+    }
+
+    // ─── Delivery getters ─────────────────────────────────────────────────────
+    function getOpenRequestCount() external view returns (uint256) { return _openIds.length; }
+    function getOpenRequestAt(uint256 index) external view returns (uint256) { return _openIds[index]; }
+    function getOpenRequests() external view returns (uint256[] memory) { return _openIds; }
+    function getOpenRequestCountFor(address device) external view returns (uint256) { return _deviceOpenIds[device].length; }
+    function getOpenRequestsFor(address device) external view returns (uint256[] memory) { return _deviceOpenIds[device]; }
+    function getMyRequests(address requester) external view returns (uint256[] memory) { return _myRequestIds[requester]; }
+    function getRequest(uint256 id) external view returns (DeliveryRequest memory) { return requests[id]; }
+
+    // ─── Request creation ─────────────────────────────────────────────────────
+    function requestDelivery(
+        int32 pickupLatE7,
+        int32 pickupLonE7,
+        int32 dropLatE7,
+        int32 dropLonE7,
+        address device,
+        uint64 expiresAt,
+        uint256 maxPrice
+    ) external returns (uint256) {
+        require(maxPrice > 0, "maxPrice must be > 0");
+        uint256 id = ++_nextRequestId;
+        DeliveryRequest storage r = requests[id];
+        r.id = id;
+        r.requester = msg.sender;
+        r.pickupLatE7 = pickupLatE7;
+        r.pickupLonE7 = pickupLonE7;
+        r.dropLatE7 = dropLatE7;
+        r.dropLonE7 = dropLonE7;
+        r.maxPrice = maxPrice;
+        r.requestedAt = uint64(block.timestamp);
+        r.status = Status.Open;
+        if (device != address(0)) {
+            r.targetedDevice = device;
+            r.expiresAt = expiresAt;
+            _deviceOpenAdd(device, id);
+        } else {
+            _openAdd(id);
+        }
+        _myRequestIds[msg.sender].push(id);
+        emit DeliveryRequested(id, msg.sender, pickupLatE7, pickupLonE7, dropLatE7, dropLonE7, uint64(block.timestamp), device, expiresAt, maxPrice);
+        return id;
+    }
+
+    function openTarget(uint256 id) external {
+        DeliveryRequest storage r = requests[id];
+        require(r.id != 0, "unknown request");
+        require(r.status == Status.Open, "not open");
+        require(r.targetedDevice != address(0), "not targeted");
+        require(r.requester == msg.sender, "not requester");
+        _deviceOpenRemove(r.targetedDevice, id);
+        r.targetedDevice = address(0);
+        r.expiresAt = 0;
+        _openAdd(id);
+    }
+
+    // ─── Propose / Accept / Progress ──────────────────────────────────────────
+    function proposeDelivery(uint256 id, uint256 price) external {
+        address device = _requireAuthorized();
+        DeliveryRequest storage r = requests[id];
+        require(r.id != 0, "unknown request");
+        require(r.status == Status.Open, "not open");
+        if (r.targetedDevice != address(0) && block.timestamp < r.expiresAt) {
+            require(device == r.targetedDevice, "not targeted device");
+            _deviceOpenRemove(r.targetedDevice, id);
+        } else {
+            _openRemove(id);
+        }
+        require(price <= r.maxPrice, "price exceeds max");
+        r.status = Status.Proposed;
+        r.proposedPrice = price;
+        r.drone = device;
+        r.proposedAt = uint64(block.timestamp);
+        emit DeliveryProposed(id, device, price, r.proposedAt);
+    }
+
+    function acceptDelivery(uint256 id) external {
+        DeliveryRequest storage r = requests[id];
+        require(r.id != 0, "unknown request");
+        require(r.status == Status.Proposed, "not proposed");
+        require(r.requester == msg.sender, "not requester");
+        uint256 price = r.proposedPrice;
+        require(price > 0, "price not set");
+        r.status = Status.Accepted;
+        r.price = price;
+        r.acceptedAt = uint64(block.timestamp);
+        require(hbToken.transferFrom(msg.sender, address(this), price), "escrow failed");
+        emit DeliveryAccepted(id, r.drone, price);
+    }
+
+    function startDelivery(uint256 id) external {
+        address device = _requireAuthorized();
+        DeliveryRequest storage r = requests[id];
+        require(r.status == Status.Accepted, "not accepted");
+        require(device == r.drone, "not assigned drone");
+        r.status = Status.Started;
+        emit DeliveryStarted(id, device);
+    }
+
+    function packagePicked(uint256 id) external {
+        address device = _requireAuthorized();
+        DeliveryRequest storage r = requests[id];
+        require(r.status == Status.Started, "not started");
+        require(device == r.drone, "not assigned drone");
+        r.status = Status.PickedUp;
+        emit PackagePicked(id, device);
+    }
+
+    function packageDropped(uint256 id) external {
+        address device = _requireAuthorized();
+        DeliveryRequest storage r = requests[id];
+        require(r.status == Status.PickedUp, "not picked up");
+        require(device == r.drone, "not assigned drone");
+        r.status = Status.Dropped;
+        emit PackageDropped(id, device);
+    }
+
+    function completeDelivery(uint256 id) external {
+        address device = _requireAuthorized();
+        DeliveryRequest storage r = requests[id];
+        require(r.status == Status.Dropped, "not dropped");
+        require(device == r.drone, "not assigned drone");
+        r.status = Status.Completed;
+        uint256 price = r.price;
+        uint256 fee = (price * FEE_BPS) / BPS_DENOM;
+        uint256 payout = price - fee;
+        address ownerOfDevice = _ownerOfDevice(device);
+        require(hbToken.transfer(ownerOfDevice, payout), "payout failed");
+        emit DeliveryCompleted(id, device, payout);
+    }
+
+    // ─── Cancel (with 2-min grace after acceptance) ───────────────────────────
+    function cancelRequest(uint256 id) external {
+        DeliveryRequest storage r = requests[id];
+        require(r.id != 0, "unknown request");
+        require(r.requester == msg.sender, "not requester");
+
+        if (r.status == Status.Open) {
+            if (r.targetedDevice != address(0)) {
+                _deviceOpenRemove(r.targetedDevice, id);
+            } else {
+                _openRemove(id);
+            }
+            r.status = Status.Cancelled;
+            emit DeliveryCancelled(id);
+            return;
+        }
+
+        if (r.status == Status.Proposed) {
+            // already removed from open lists when proposed
+            r.status = Status.Cancelled;
+            emit DeliveryCancelled(id);
+            return;
+        }
+
+        if (r.status == Status.Accepted) {
+            // NEW: allow cancellation within 2 minutes from acceptance,
+            // refunding the escrow to requester.
+            require(block.timestamp <= uint256(r.acceptedAt) + CANCEL_WINDOW, "cancel window passed");
+            uint256 price = r.price;
+            r.status = Status.Cancelled;
+            // refund escrow
+            require(hbToken.transfer(r.requester, price), "refund failed");
+            emit DeliveryCancelled(id);
+            return;
+        }
+
+        revert("cannot cancel");
     }
 }
