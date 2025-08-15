@@ -1,5 +1,11 @@
 import "./tasks/check-balance";
 import "./tasks/claim-balance";
+// Register custom delivery tasks.  These tasks are defined in
+// tasks/hummingbird.ts and extend the Hardhat CLI with additional
+// commands for interacting with delivery requests (create, cancel,
+// propose, accept, progress, etc.).  Without this import the tasks
+// will not be loaded.
+import "./tasks/hummingbird";
 
 import '@nomicfoundation/hardhat-toolbox';
 import { HardhatUserConfig } from 'hardhat/config';
