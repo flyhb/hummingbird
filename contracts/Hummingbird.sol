@@ -67,6 +67,13 @@ contract Hummingbird {
 
     mapping(address => uint256[]) private _myRequestIds;
 
+    // ─── Ongoing Request Tracking ──────────────────────────────────────────
+    // Maintain a dense list of all ongoing requests (any status except
+    // Completed or Cancelled).  We store the IDs in a vector and track
+    // each ID's position (plus one) in a mapping for O(1) add/remove.
+    uint256[] private _ongoingList;
+    mapping(uint256 => uint256) private _ongoingIndexPlus1;
+
     uint256 public constant FEE_BPS = 300;     // 3%
     uint256 public constant BPS_DENOM = 10_000;
     uint256 public constant CANCEL_WINDOW = 120; // 120 seconds after acceptance
@@ -90,6 +97,75 @@ contract Hummingbird {
     event PackageDropped(uint256 indexed id, address indexed drone);
     event DeliveryCompleted(uint256 indexed id, address indexed drone, uint256 payout);
     event DeliveryCancelled(uint256 indexed id);
+
+    // ─── Ongoing list helpers ─────────────────────────────────────────────
+    /// @dev Add a request ID to the ongoing list if not already present.
+    function _ongoingAdd(uint256 id) internal {
+        // If id is already in the set (indexPlus1 != 0), do nothing.
+        if (_ongoingIndexPlus1[id] != 0) return;
+        _ongoingList.push(id);
+        _ongoingIndexPlus1[id] = _ongoingList.length;
+    }
+
+    /// @dev Remove a request ID from the ongoing list if present.
+    function _ongoingRemove(uint256 id) internal {
+        uint256 idxPlus1 = _ongoingIndexPlus1[id];
+        if (idxPlus1 == 0) return;
+        uint256 i = idxPlus1 - 1;
+        uint256 lastIndex = _ongoingList.length - 1;
+        if (i != lastIndex) {
+            uint256 movedId = _ongoingList[lastIndex];
+            _ongoingList[i] = movedId;
+            _ongoingIndexPlus1[movedId] = idxPlus1;
+        }
+        _ongoingList.pop();
+        _ongoingIndexPlus1[id] = 0;
+    }
+
+    /// @dev Internal hook to update the ongoing list whenever a status changes.
+    /// Adds the request to the list for non-terminal statuses and removes it
+    /// when it transitions to Completed or Cancelled.
+    function _onStatusChange(uint256 id, Status newStatus) internal {
+        if (newStatus == Status.Completed || newStatus == Status.Cancelled) {
+            _ongoingRemove(id);
+        } else {
+            _ongoingAdd(id);
+        }
+    }
+
+    /// @notice Return all ongoing request IDs.
+    function getOngoingRequests() external view returns (uint256[] memory) {
+        return _ongoingList;
+    }
+
+    /// @notice Return the number of ongoing requests.
+    function getOngoingRequestCount() external view returns (uint256) {
+        return _ongoingList.length;
+    }
+
+    /// @notice Return the ongoing request ID at a given index.
+    function getOngoingRequestAt(uint256 index) external view returns (uint256) {
+        require(index < _ongoingList.length, "index out of bounds");
+        return _ongoingList[index];
+    }
+
+    /// @notice Return a summary of a request containing only pickup and dropoff
+    /// coordinates and status.  This avoids returning the entire struct and
+    /// is useful for front-end queries.
+    function getRequestSummary(uint256 id)
+        external
+        view
+        returns (
+            int32 pickupLatE7,
+            int32 pickupLonE7,
+            int32 dropLatE7,
+            int32 dropLonE7,
+            Status status
+        )
+    {
+        DeliveryRequest storage r = requests[id];
+        return (r.pickupLatE7, r.pickupLonE7, r.dropLatE7, r.dropLonE7, r.status);
+    }
 
     // ─── Liveness (unchanged) ─────────────────────────────────────────────────
     struct LivenessData {
@@ -276,6 +352,8 @@ contract Hummingbird {
         r.maxPrice = maxPrice;
         r.requestedAt = uint64(block.timestamp);
         r.status = Status.Open;
+        // Add to ongoing list (non-terminal status)
+        _onStatusChange(id, Status.Open);
         if (device != address(0)) {
             r.targetedDevice = device;
             r.expiresAt = expiresAt;
@@ -314,6 +392,8 @@ contract Hummingbird {
         }
         require(price <= r.maxPrice, "price exceeds max");
         r.status = Status.Proposed;
+        // Update ongoing list after status change
+        _onStatusChange(id, Status.Proposed);
         r.proposedPrice = price;
         r.drone = device;
         r.proposedAt = uint64(block.timestamp);
@@ -328,6 +408,8 @@ contract Hummingbird {
         uint256 price = r.proposedPrice;
         require(price > 0, "price not set");
         r.status = Status.Accepted;
+        // Update ongoing list after status change
+        _onStatusChange(id, Status.Accepted);
         r.price = price;
         r.acceptedAt = uint64(block.timestamp);
         require(hbToken.transferFrom(msg.sender, address(this), price), "escrow failed");
@@ -340,6 +422,8 @@ contract Hummingbird {
         require(r.status == Status.Accepted, "not accepted");
         require(device == r.drone, "not assigned drone");
         r.status = Status.Started;
+        // Update ongoing list after status change
+        _onStatusChange(id, Status.Started);
         emit DeliveryStarted(id, device);
     }
 
@@ -349,6 +433,8 @@ contract Hummingbird {
         require(r.status == Status.Started, "not started");
         require(device == r.drone, "not assigned drone");
         r.status = Status.PickedUp;
+        // Update ongoing list after status change
+        _onStatusChange(id, Status.PickedUp);
         emit PackagePicked(id, device);
     }
 
@@ -358,6 +444,8 @@ contract Hummingbird {
         require(r.status == Status.PickedUp, "not picked up");
         require(device == r.drone, "not assigned drone");
         r.status = Status.Dropped;
+        // Update ongoing list after status change
+        _onStatusChange(id, Status.Dropped);
         emit PackageDropped(id, device);
     }
 
@@ -367,6 +455,8 @@ contract Hummingbird {
         require(r.status == Status.Dropped, "not dropped");
         require(device == r.drone, "not assigned drone");
         r.status = Status.Completed;
+        // Update ongoing list after status change
+        _onStatusChange(id, Status.Completed);
         uint256 price = r.price;
         uint256 fee = (price * FEE_BPS) / BPS_DENOM;
         uint256 payout = price - fee;
@@ -388,6 +478,8 @@ contract Hummingbird {
                 _openRemove(id);
             }
             r.status = Status.Cancelled;
+            // Update ongoing list after status change
+            _onStatusChange(id, Status.Cancelled);
             emit DeliveryCancelled(id);
             return;
         }
@@ -395,6 +487,8 @@ contract Hummingbird {
         if (r.status == Status.Proposed) {
             // already removed from open lists when proposed
             r.status = Status.Cancelled;
+            // Update ongoing list after status change
+            _onStatusChange(id, Status.Cancelled);
             emit DeliveryCancelled(id);
             return;
         }
@@ -405,6 +499,8 @@ contract Hummingbird {
             require(block.timestamp <= uint256(r.acceptedAt) + CANCEL_WINDOW, "cancel window passed");
             uint256 price = r.price;
             r.status = Status.Cancelled;
+            // Update ongoing list after status change
+            _onStatusChange(id, Status.Cancelled);
             // refund escrow
             require(hbToken.transfer(r.requester, price), "refund failed");
             emit DeliveryCancelled(id);
