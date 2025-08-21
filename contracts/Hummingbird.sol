@@ -350,6 +350,40 @@ contract Hummingbird {
         return id;
     }
 
+    /* 
+     * @notice Removes any ongoing request that was not completed after 1 hour.
+     * This can be called by anyone, it will mint 0.1 HB token per request.
+     * @dev This is a cleanup function to remove stale requests.
+    */
+    function cleanupStaleRequests() external {
+        uint256 count = _ongoingList.length;
+        require(count > 0, "no ongoing requests");
+        uint256 reward = 0;
+        for (uint256 i = 0; i < count; i++) {
+            uint256 id = _ongoingList[i];
+            DeliveryRequest storage r = requests[id];
+            if (r.status == Status.Open && block.timestamp >= r.requestedAt + 1 hours) {
+                // Remove from ongoing list
+                _ongoingRemove(id);
+                // Remove from open lists
+                if (r.targetedDevice != address(0)) {
+                    _deviceOpenRemove(r.targetedDevice, id);
+                } else {
+                    _openRemove(id);
+                }
+                // Mark as cancelled
+                r.status = Status.Cancelled;
+                emit DeliveryCancelled(id);
+                reward += 100 * 10**18; // 0.1 HB token per request
+            }
+        }
+        if (reward > 0) {
+            hbToken.mint(msg.sender, reward);
+        }
+    }
+
+
+
     /*     
      * @notice Open a request that was initially targeted to a specific device.
      * @dev This is used to target a request to a specific drone.
