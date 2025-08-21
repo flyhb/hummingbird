@@ -242,6 +242,24 @@ task("hb:list-open", "List all open delivery request ids")
     }
   });
 
+  // List all open request IDs along with status and assigned drone (if any).
+task("hb:list-ongoing", "List all ongoing delivery request ids")
+  .addOptionalParam("contract", "Hummingbird contract address")
+  .setAction(async (args, hre) => {
+    const hb = await getHB(hre, undefined, args.contract);
+    const ids: bigint[] = await hb.getOngoingRequests();
+    if (ids.length === 0) {
+      console.log("(no open requests)");
+      return;
+    }
+    for (const id of ids) {
+      const r = await hb.getRequest(id);
+      console.log(
+        `id=${id.toString()} status=${statusName(r.status)} drone=${r.drone} expiresAt=${r.expiresAt.toString()}`,
+      );
+    }
+  });
+
 // List open (targeted) requests for a particular device.  Only shows
 // requests that are targeted to the given device and still open/valid.
 task("hb:list-open-for", "List open (targeted) requests for a device")
