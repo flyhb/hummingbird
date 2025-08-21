@@ -149,23 +149,7 @@ contract Hummingbird {
         return _ongoingList[index];
     }
 
-    /// @notice Return a summary of a request containing only pickup and dropoff
-    /// coordinates and status.  This avoids returning the entire struct and
-    /// is useful for front-end queries.
-    function getRequestSummary(uint256 id)
-        external
-        view
-        returns (
-            int32 pickupLatE7,
-            int32 pickupLonE7,
-            int32 dropLatE7,
-            int32 dropLonE7,
-            Status status
-        )
-    {
-        DeliveryRequest storage r = requests[id];
-        return (r.pickupLatE7, r.pickupLonE7, r.dropLatE7, r.dropLonE7, r.status);
-    }
+    
 
     // ─── Liveness (unchanged) ─────────────────────────────────────────────────
     struct LivenessData {
@@ -366,27 +350,38 @@ contract Hummingbird {
         return id;
     }
 
-    function openTarget(uint256 id) external {
+    /*     
+     * @notice Open a request that was initially targeted to a specific device.
+     * @dev This is used to target a request to a specific drone.
+     * The request must be open and already targeted. Only the requester can open it.
+     */
+    function openTargetedRequest(uint256 id) external {
         DeliveryRequest storage r = requests[id];
         require(r.id != 0, "unknown request");
-        require(r.status == Status.Open, "not open");
-        require(r.targetedDevice != address(0), "not targeted");
-        require(r.requester == msg.sender, "not requester");
+        require(r.status == Status.Open, "request not open");
+        require(r.targetedDevice != address(0), "request already open");
+        require(r.requester == msg.sender, "you are not the requester");
         _deviceOpenRemove(r.targetedDevice, id);
         r.targetedDevice = address(0);
         r.expiresAt = 0;
         _openAdd(id);
     }
 
+
     // ─── Propose / Accept / Progress ──────────────────────────────────────────
     function proposeDelivery(uint256 id, uint256 price) external {
         address device = _requireAuthorized();
         DeliveryRequest storage r = requests[id];
         require(r.id != 0, "unknown request");
-        require(r.status == Status.Open, "not open");
-        if (r.targetedDevice != address(0) && block.timestamp < r.expiresAt) {
+        require(r.status == Status.Open, "request not in open state");
+        if (r.targetedDevice != address(0)) {
+        // If still in the exclusive window, only the targeted device may propose
+        if (block.timestamp < r.expiresAt) {
             require(device == r.targetedDevice, "not targeted device");
-            _deviceOpenRemove(r.targetedDevice, id);
+        }
+        _deviceOpenRemove(r.targetedDevice, id);   // ✅ always remove from device list
+        // (optional) clear targeting metadata if expired:
+        // if (block.timestamp >= r.expiresAt) { r.targetedDevice = address(0); r.expiresAt = 0; }
         } else {
             _openRemove(id);
         }
