@@ -53,8 +53,8 @@ npx hardhat test
 ### Berachain Testnet
 **HB Token**: 0x49cc6E12d483f4672B19fe703966D6E96A2A887F
 
-**Hummingbird Logic**: 0xD431bCC02F01176FF3CA567b1c333a6Dcac1E97B
-**HBToken minter set to**: 0xD431bCC02F01176FF3CA567b1c333a6Dcac1E97B
+**Hummingbird Logic**: 0xFce91441d3D00824c5c33Cb4D68173a92a34c09D
+**HBToken minter set to**: 0xFce91441d3D00824c5c33Cb4D68173a92a34c09D
 
 ### Instructions
 Before deploying, replace the placeholder values in `scripts/deploy.js` with the actual deployed addresses of the ioID ERC‑721 contract, the ioID registry, the HB token contract and the project ID you want the Hummingbird contract to serve.
